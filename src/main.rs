@@ -3,17 +3,18 @@ use std::{
     fs,
     net::{SocketAddr, UdpSocket},
     path::PathBuf,
+    io::{self, Write}
 };//standard
+use axum_server::tls_rustls::RustlsConfig;
 use once_cell::sync::Lazy;
 use mime_guess;
 use tower_cookies::{Cookies, Cookie, CookieManagerLayer};
 use tokio::{
     fs::File,
-    io::{AsyncWriteExt, BufReader},   // BufReader added for streaming
-    net::TcpListener,
+    io::{AsyncWriteExt, BufReader},   // BufReader added for streaming  
 };
 use dotenvy;
-use tokio_util::io::ReaderStream; //tokio
+use tokio_util::io::ReaderStream; 
 use axum::{
     body::Body,
     extract::{Multipart, Path, DefaultBodyLimit},
@@ -24,9 +25,75 @@ use axum::{
     routing::{get, post},
     Json,
     Router,
-    serve,
     Form
 };//axum
+
+//Help generate keys to use HTTPS
+fn ensure_certificates() -> Result<(), Box<dyn std::error::Error>> {
+    let cert_path = PathBuf::from("cert.pem");
+    let key_path = PathBuf::from("key.pem");
+
+    if cert_path.exists() && key_path.exists() {
+        return Ok(());
+    }
+
+    println!("Generating self-signed certificates...");
+
+    // Generate a certificate for "localhost" and the local IP
+    let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()]);
+    
+    // Attempt to add the actual LAN IP to the cert SANs (Subject Alternative Names)
+    if let Some(ip) = get_local_ip() {
+        params.subject_alt_names.push(rcgen::SanType::IpAddress(ip.parse()?));
+    }
+
+    let cert = rcgen::Certificate::from_params(params)?;
+    
+    let pem_serialized = cert.serialize_pem()?;
+    let key_serialized = cert.serialize_private_key_pem();
+
+    fs::write(&cert_path, pem_serialized)?;
+    fs::write(&key_path, key_serialized)?;
+
+    println!("Certificates generated successfully!");
+    Ok(())
+}
+
+fn ensure_password() -> Result<(), Box<dyn std::error::Error>> {
+    let env_path = PathBuf::from("PASSWORD.env");
+
+    if env_path.exists() {
+        return Ok(());
+    }
+
+    println!("--------------------------------------------------");
+    println!("First time setup: No password found.");
+    print!("Please enter a password for rShare: ");
+    io::stdout().flush()?; // Ensure the prompt prints immediately
+
+    let mut new_password = String::new();
+    io::stdin().read_line(&mut new_password)?;
+    let new_password = new_password.trim(); // Remove the newline character
+
+    if new_password.is_empty() {
+        return Err("Password cannot be empty!".into());
+    }
+
+    // Save to file
+    let content = format!("APP_PASSWORD={}", new_password);
+    fs::write(&env_path, content)?;
+
+    println!("Password saved to 'PASSWORD.env'.");
+    println!("--------------------------------------------------");
+    
+    // Crucial: We must load the .env file immediately so the current process sees it
+    dotenvy::from_filename("PASSWORD.env").ok();
+
+    Ok(())
+}
+
+
+
 use serde::Deserialize;
 fn get_local_ip() -> Option<String> {
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;//connects to the IP address of the user (this computer)
@@ -34,14 +101,29 @@ fn get_local_ip() -> Option<String> {
     Some(sock.local_addr().ok()?.ip().to_string())//strings the IP
 }
 
+
+
 #[tokio::main]
 async fn main() {
+
+    // 1. Ensure certificates exist before starting
+    if let Err(e) = ensure_certificates() {
+        eprintln!("Error generating certificates: {}", e);
+        return;
+    }
+    //2. Make sure that there is a browser password before running!
+
+    if let Err(e) = ensure_password() {
+        eprintln!("Error setting password: {}", e);
+        return;
+    }
+
     let protected_routes = Router::new()
         .route("/", get(index))
         .route("/upload", post(upload))
         .route("/files", get(list_files))
         .route("/download/{name}", get(download))
-        .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))//1024*1024*1024 is 1gb, so change to what you want, if it's safe to do so.
+        .layer(DefaultBodyLimit::max(25024 * 1024 * 1024))//1024*1024*1024 is 1gb, so change to what you want, if it's safe to do so.
         .route_layer(middleware::from_fn(require_auth));
 
     let app = Router::new()
@@ -49,22 +131,40 @@ async fn main() {
     .merge(protected_routes)
     .layer(CookieManagerLayer::new());
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
-    let listener = TcpListener::bind(addr).await.unwrap();
+        // 1. Load the certificate and private key
+        // Ensure cert.pem and key.pem are GENERATED!
+    let config = RustlsConfig::from_pem_file(
+        PathBuf::from("cert.pem"), 
+        PathBuf::from("key.pem")
+    )
+    .await
+    .expect("Failed to load TLS certificates! Run the openssl command first.");
 
     let lan_ip = get_local_ip().unwrap_or_else(|| "unknown".into());
-    println!(" rShare running:");
-    println!("  Local  -> http://localhost:8080/login");
-    println!("  LAN    -> http://{}:8080/login", lan_ip);//gives away the lan ID of the server
+    let port = 8080;
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
-    serve(listener, app.into_make_service()).await.unwrap();
+   println!(" rShare running (HTTPS):");
+    println!("  Local  -> https://localhost:{}/login", port);
+    println!("  LAN    -> https://{}:{}/login", lan_ip, port);
+    println!("  (Note: Accept the browser warning to proceed)");
+
+    // 2. Bind using axum-server with the TLS config
+    axum_server::bind_rustls(addr, config)
+        .serve(app.into_make_service())
+        .await
+        .unwrap();
 }
 
+
+//Call the app password file, called PASSWORD.env
 static APP_PASSWORD: Lazy<String> = Lazy::new(|| {
     dotenvy::from_filename("PASSWORD.env").ok(); // load file
     env::var("APP_PASSWORD").expect("APP_PASSWORD not set")
 });
 
+
+//The HTML Code. keep it minimal
 async fn index() -> Html<&'static str> {
     // A minimal HTML/JS front page
     //maybe I could make this a bit more pretty?
