@@ -44,3 +44,5 @@ If I wrote the code correctly, Step 2 and 3 are unnecessary. Just be sure that e
 Something you can do is to make a shell command from this program, or make a .EXE file and make a shortcut to your desktop. Maybe I'll make a binary package.
 
 NOTE: For best usage, please use Tailscale VPN to connect your devices over different wifi hosts. The MagicDNS service can also save you a headache from remembering all of those numbers.
+
+Update 2.11.2026 -- The pretty update. Made the app prettier, easier to read and to understand.

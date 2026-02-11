@@ -123,7 +123,10 @@ async fn main() {
         .route("/upload", post(upload))
         .route("/files", get(list_files))
         .route("/download/{name}", get(download))
-        .layer(DefaultBodyLimit::max(25024 * 1024 * 1024))//1024*1024*1024 is 1gb, so change to what you want, if it's safe to do so.
+
+        //1024*1024*1024 is 1gb, so change to what you want, if it's safe to do so. This changes the max size the user can upload to hostPC
+        .layer(DefaultBodyLimit::max(25024 * 1024 * 1024))
+
         .route_layer(middleware::from_fn(require_auth));
 
     let app = Router::new()
@@ -140,6 +143,7 @@ async fn main() {
     .await
     .expect("Failed to load TLS certificates! Run the openssl command first.");
 
+
     let lan_ip = get_local_ip().unwrap_or_else(|| "unknown".into());
     let port = 8080;
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -147,7 +151,7 @@ async fn main() {
    println!(" rShare running (HTTPS):");
     println!("  Local  -> https://localhost:{}/login", port);
     println!("  LAN    -> https://{}:{}/login", lan_ip, port);
-    println!("  (Note: Accept the browser warning to proceed)");
+    println!("  !Note: Accept the browser warning to proceed, connection is secure!");
 
     // 2. Bind using axum-server with the TLS config
     axum_server::bind_rustls(addr, config)
@@ -176,7 +180,7 @@ async fn index() -> Html<&'static str> {
 <style>
 body {
     font-family: Arial, sans-serif;
-    background: #f7f7f7;
+    background: #ffffff;
     max-width: 700px;
     margin: 40px auto;
     padding: 20px;
@@ -187,19 +191,20 @@ h1 { text-align: center; color: #333; }
 p  { text-align: center; color: #333; }
 button {
     padding: 6px 12px;
-    background: #be3e1eff;
+    background: #2f23a0;
     color: white;
     border: none;
     border-radius: 4px;
     cursor: pointer;
 }
-button:hover { background: #45a049; }
+button:hover { background: #6e30ff; }
 ul { list-style: none; padding-left: 0; }
 li { margin: 5px 0; }
 </style>
 </head>
 <body>
-<p>Welcome to Rust Share! Upload files below and share them across your network (almost) instantly.</p>
+<h3>Welcome to Rust Share!<h3>
+<p>Upload files below and share them across your network</p>
 
 <h3>Upload a file</h3>
 <form id="upload-form" enctype="multipart/form-data" method="post" action="/upload">
@@ -224,6 +229,8 @@ async function refreshFiles(){
 }
 refreshFiles();
 </script>
+<h3>Written by Bunto-man on Github<h3>
+<p>https://github.com/Bunto-man/<p>
 </body>
 </html>
 "#)
@@ -237,7 +244,7 @@ async fn login_form() -> Html<&'static str> {
     <style>
 body {
     font-family: Arial, sans-serif;
-    background: #f7f7f7;
+    background: #ffffff;
     max-width: 700px;
     margin: 40px auto;
     padding: 20px;
@@ -248,21 +255,22 @@ h1 { text-align: center; color: #333; }
 p  { text-align: center; color: #333; }
 button {
     padding: 6px 12px;
-    background: #be3e1eff;
+    background: #2f23a0;
     color: white;
     border: none;
     border-radius: 4px;
     cursor: pointer;
 }
-button:hover { background: #45a049; }
+button:hover { background: #6e30ff; }
 ul { list-style: none; padding-left: 0; }
 li { margin: 5px 0; }
 </style>
     <h2>Enter Password:</h2>
     <form method="post" action="/login">
-      <input type="password" name="password" placeholder="Password">
+      <input type="password" name="password" placeholder="Secret Password">
       <button type="submit">Login</button>
     </form>
+    <h3>rustshare<h3>
     "#)
 }
 
@@ -297,9 +305,11 @@ async fn upload(mut multipart: Multipart) -> impl IntoResponse {
         if let Some(filename) = field.file_name().map(|s| s.to_string()) {
             let path = PathBuf::from("uploads").join(&filename);
             let mut file = File::create(&path).await.unwrap();
-
             let mut written: u64 = 0;
-            const MAX_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB limit (example)
+
+
+            const MAX_SIZE: u64 = 25024 * 1024 * 1024; // Change this value to change the max file upload size.
+
 
             while let Some(chunk) = field.chunk().await.unwrap() {
                 written += chunk.len() as u64;
