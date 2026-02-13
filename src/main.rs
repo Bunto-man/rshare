@@ -106,12 +106,15 @@ fn get_local_ip() -> Option<String> {
 #[tokio::main]
 async fn main() {
 
-    // 1. Ensure certificates exist before starting
+    //1. // 1. Create uploads folder immediately
+    std::fs::create_dir_all("uploads").expect("Failed to create uploads folder");
+    
+    // 2. Ensure certificates exist before starting
     if let Err(e) = ensure_certificates() {
         eprintln!("Error generating certificates: {}", e);
         return;
     }
-    //2. Make sure that there is a browser password before running!
+    //3. Make sure that there is a browser password before running!
 
     if let Err(e) = ensure_password() {
         eprintln!("Error setting password: {}", e);
