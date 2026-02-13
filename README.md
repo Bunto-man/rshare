@@ -8,10 +8,11 @@ Before **rShare**, sharing large files often meant:
 
 rShare fixes that with a **direct LAN connection** for instant, reliable transfers.
 
-HOW TO USE:
+**HOW TO USE:**
 
 Extract binary or clone repo and run.
-If that does not work, follow the troubleshooting steps below.
+
+*If that does not work, follow the troubleshooting steps below.*
 
 Step 1: 
 If it does not exist already, make a folder called "uploads"
