@@ -14,6 +14,9 @@ Extract binary or clone repo and run.
 
 *If that does not work, follow the troubleshooting steps below.*
 
+
+**Troubleshooting**
+
 Step 1: 
 If it does not exist already, make a folder called "uploads"
 
@@ -50,3 +53,9 @@ NOTE: For best usage, please use Tailscale VPN to connect your devices over diff
 Update 2.11.2026 -- The pretty update. Made the app prettier, easier to read and to understand.
 
 Update 2.12.2026 -- The Foolproof Update. Made the app fool proof for a friend.
+
+Update 3.4.2026 -- The Users Update. Made the app fool proof for me.
+*ADDED CONFIG FILES*
+* Max File Size
+* Upload speed
+* Download Speed
