@@ -1,1 +1,6 @@
 /target
+/cert.pem
+/PASSWORD.env
+/key.pem
+/uploads
+/config.ini

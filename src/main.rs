@@ -1,3 +1,4 @@
+use core::f64;
 use std::{
     env,
     fs,
@@ -11,7 +12,7 @@ use mime_guess;
 use tower_cookies::{Cookies, Cookie, CookieManagerLayer};
 use tokio::{
     fs::File,
-    io::{AsyncWriteExt, BufReader},   // BufReader added for streaming  
+    io::{AsyncWriteExt, BufReader,BufWriter},   // BufReader added for streaming  
 };
 use dotenvy;
 use tokio_util::io::ReaderStream; 
@@ -28,6 +29,103 @@ use axum::{
     Form
 };//axum
 
+//Struct for the config file
+pub struct AppConfig {
+    pub max_upload_size: u64,
+    pub upload_speed_bps: u64,   // 0 means unlimited
+    pub download_speed_bps: u64, // 0 means unlimited
+}
+
+//Let's create a config for users. 
+static CONFIG: Lazy<AppConfig> = Lazy::new(|| {
+    let config_path = "config.ini";
+    
+    // Set your defaults here
+    let mut current_config = AppConfig {
+        max_upload_size: 1024 * 1024 * 1024, // 1GB
+        upload_speed_bps: 1024*1024,                 // 1 MB default
+        download_speed_bps: 1024*1024,               // 1 MB default
+    };
+
+    if !std::path::Path::new(config_path).exists() {
+        println!("Config file not found. Creating {}...", config_path);
+        let mut file = std::fs::File::create(config_path).expect("Failed to create config file");
+        //rewrite this so that it can use multipliers.
+        //now it should be able to parse itself...
+        writeln!(file, "[Settings]").unwrap();
+        writeln!(file, "# Set max upload size in bytes. 1024*1024*1024 = 1GB").unwrap();
+        writeln!(file, "default is 1024*1024*1024 bytes").unwrap();
+        writeln!(file, "file_Size=1024*1024*1024").unwrap();
+        writeln!(file, "# Set max upload/download speed in bytes per second (0 = unlimited), 1024*1024 = 1MB Default").unwrap();
+        writeln!(file, "upload_speed=1024*1024").unwrap();
+        writeln!(file, "download_speed=1024*1024").unwrap();
+        
+        return current_config;
+    }
+    //I want users to be able to input multipliers.
+    //this parses strings and returns the bit size for the program.
+
+    // Read the file and update the struct if values are found
+    let content = std::fs::read_to_string(config_path).unwrap_or_default();
+    //for all the lines...
+    for line in content.lines() {
+        // Ignore lines that start with '#' (comments)
+        if line.trim().starts_with('#') {
+            continue; 
+        }
+
+        if let Some(val) = line.strip_prefix("file_Size=") {
+            current_config.max_upload_size = parse_math_string(val, current_config.max_upload_size);
+            
+        } else if let Some(val) = line.strip_prefix("upload_speed=") {
+            current_config.upload_speed_bps = parse_math_string(val, current_config.upload_speed_bps);
+            
+        } else if let Some(val) = line.strip_prefix("download_speed=") {
+            current_config.download_speed_bps = parse_math_string(val, current_config.download_speed_bps);
+        }
+    }
+    
+    current_config
+});
+    //this function handles the multipliers
+  fn parse_math_string(input: &str, default_size: u64) -> u64 {
+    let mut total: u64 = 1;
+    let mut parsed_anything = false;
+
+    // Split the string by the asterisk
+    for part in input.split('*') {
+        let clean_part = part.trim();
+        
+        // Skip empty parts (e.g., if someone typed "1024 * ")
+        if clean_part.is_empty() {
+            continue;
+        }
+
+        // Try to parse the chunk into a number
+        match clean_part.parse::<u64>() {
+            Ok(num) => {
+                // saturating_mul prevents the server from crashing if a user 
+                // types a number so big it overflows Rust's u64 limit!
+                total = total.saturating_mul(num);
+                parsed_anything = true;
+            }
+            Err(_) => {
+                // If they typed letters like "1024 * apples", give up and return default
+                println!("Warning: Invalid math in config. Falling back to default.");
+                return default_size;
+            }
+        }
+    }
+
+    if parsed_anything {
+        total
+    } else {
+        default_size
+    }
+}
+
+
+
 //Help generate keys to use HTTPS
 fn ensure_certificates() -> Result<(), Box<dyn std::error::Error>> {
     let cert_path = PathBuf::from("cert.pem");
@@ -36,7 +134,7 @@ fn ensure_certificates() -> Result<(), Box<dyn std::error::Error>> {
     if cert_path.exists() && key_path.exists() {
         return Ok(());
     }
-
+    //feedback
     println!("Generating self-signed certificates...");
 
     // Generate a certificate for "localhost" and the local IP
@@ -46,9 +144,10 @@ fn ensure_certificates() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ip) = get_local_ip() {
         params.subject_alt_names.push(rcgen::SanType::IpAddress(ip.parse()?));
     }
-
+    //define and write your certificates
     let cert = rcgen::Certificate::from_params(params)?;
-    
+
+    //should these be put into a struct? will that save on memory?
     let pem_serialized = cert.serialize_pem()?;
     let key_serialized = cert.serialize_private_key_pem();
 
@@ -60,40 +159,43 @@ fn ensure_certificates() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn ensure_password() -> Result<(), Box<dyn std::error::Error>> {
+    //ensure the passwords are there.
     let env_path = PathBuf::from("PASSWORD.env");
 
     if env_path.exists() {
         return Ok(());
     }
 
-    println!("--------------------------------------------------");
+    println!("!--------------------------------------------------!");
     println!("First time setup: No password found.");
-    print!("Please enter a password for rShare: ");
+    println!("Please enter a password for rShare: ");
+    println!("?--------------------------------------------------?");
     io::stdout().flush()?; // Ensure the prompt prints immediately
 
     let mut new_password = String::new();
     io::stdin().read_line(&mut new_password)?;
-    let new_password = new_password.trim(); // Remove the newline character
+    let new_password = new_password.trim(); // Remove the newline character (needed?!)
 
+    //cheeky error message
     if new_password.is_empty() {
-        return Err("Password cannot be empty!".into());
+        return Err("Password cannot be empty. You don't want that.".into());
     }
 
-    // Save to file
+    // Save the new password to file
     let content = format!("APP_PASSWORD={}", new_password);
     fs::write(&env_path, content)?;
 
     println!("Password saved to 'PASSWORD.env'.");
-    println!("--------------------------------------------------");
+    println!("~--------------------------------------------------~");
     
-    // Crucial: We must load the .env file immediately so the current process sees it
+    // load the env file immediately.
     dotenvy::from_filename("PASSWORD.env").ok();
 
     Ok(())
 }
 
 
-
+//get the local IP
 use serde::Deserialize;
 fn get_local_ip() -> Option<String> {
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;//connects to the IP address of the user (this computer)
@@ -105,31 +207,31 @@ fn get_local_ip() -> Option<String> {
 
 #[tokio::main]
 async fn main() {
-
-    //1. // 1. Create uploads folder immediately
+    
+    //1. Create uploads folder immediately (could go later but nahhh)
     std::fs::create_dir_all("uploads").expect("Failed to create uploads folder");
     
-    // 2. Ensure certificates exist before starting
+    // 2. Ensure certificates exist before starting the router.
     if let Err(e) = ensure_certificates() {
         eprintln!("Error generating certificates: {}", e);
         return;
     }
-    //3. Make sure that there is a browser password before running!
+    //3. Make sure that there is a browser password before starting the router, too.
 
     if let Err(e) = ensure_password() {
         eprintln!("Error setting password: {}", e);
         return;
     }
-
+    //define the routes that the "website" allows
     let protected_routes = Router::new()
-        .route("/", get(index))
-        .route("/upload", post(upload))
-        .route("/files", get(list_files))
-        .route("/download/{name}", get(download))
+        .route("/", get(index)) //the main dashboard
+        .route("/upload", post(upload)) //the "website" the browser is in during the upload..?
+        .route("/files", get(list_files)) //the files
+        .route("/download/{name}", get(download)) 
 
         //1024*1024*1024 is 1gb, so change to what you want, if it's safe to do so. This changes the max size the user can upload to hostPC
-        .layer(DefaultBodyLimit::max(25024 * 1024 * 1024))
-
+        .layer(DefaultBodyLimit::max(CONFIG.max_upload_size as usize))
+        
         .route_layer(middleware::from_fn(require_auth));
 
     let app = Router::new()
@@ -156,6 +258,14 @@ async fn main() {
     println!("  LAN    -> https://{}:{}/login", lan_ip, port);
     println!("  !Note: Accept the browser warning to proceed, connection is secure!");
 
+    //make some pretty values for the user.
+
+    let pretty_max_size = CONFIG.max_upload_size as f64 / (1024.0*1024.0*1024.0);
+    let pretty_upload_speed =CONFIG.upload_speed_bps as f64 / (1024.0*1024.0);
+    let pretty_download_speed =CONFIG.upload_speed_bps as f64 / (1024.0*1024.0);
+    println!("Upload Speed : {:.2}MB/s || Download Speed : {:.2}MB/s",pretty_upload_speed,pretty_download_speed);
+    println!("-~ Max File Size Set To {:.2} GB. This Can Be Changed In Config.ini ~-",pretty_max_size);
+
     // 2. Bind using axum-server with the TLS config
     axum_server::bind_rustls(addr, config)
         .serve(app.into_make_service())
@@ -171,112 +281,21 @@ static APP_PASSWORD: Lazy<String> = Lazy::new(|| {
 });
 
 
-//The HTML Code. keep it minimal
+//The HTML Code. keep it minimal. This calls for the index.html
 async fn index() -> Html<&'static str> {
-    // A minimal HTML/JS front page
-    //maybe I could make this a bit more pretty?
-    Html(r#"
-<!DOCTYPE html>
-<html>
-<head>
-<title>Rust--Share</title>
-<style>
-body {
-    font-family: Arial, sans-serif;
-    background: #ffffff;
-    max-width: 700px;
-    margin: 40px auto;
-    padding: 20px;
-    border-radius: 8px;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.14);
+    Html(include_str!("../index.html"))
 }
-h1 { text-align: center; color: #333; }
-p  { text-align: center; color: #333; }
-button {
-    padding: 6px 12px;
-    background: #2f23a0;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-}
-button:hover { background: #6e30ff; }
-ul { list-style: none; padding-left: 0; }
-li { margin: 5px 0; }
-</style>
-</head>
-<body>
-<h3>Welcome to Rust Share!<h3>
-<p>Upload files below and share them across your network</p>
 
-<h3>Upload a file</h3>
-<form id="upload-form" enctype="multipart/form-data" method="post" action="/upload">
-  <input type="file" name="file" />
-  <button type="submit">Upload</button>
-</form>
-
-<h3>Available Files</h3>
-<ul id="file-list"></ul>
-
-<script>
-async function refreshFiles(){
-  const res = await fetch('/files');
-  const files = await res.json();
-  const list = document.getElementById('file-list');
-  list.innerHTML = '';
-  files.forEach(name=>{
-    const li = document.createElement('li');
-    li.innerHTML = `<a href="/download/${name}">${name}</a>`;
-    list.appendChild(li);
-  });
-}
-refreshFiles();
-</script>
-<h3>Written by Bunto-man on Github<h3>
-<p>https://github.com/Bunto-man/<p>
-</body>
-</html>
-"#)
-}
 
 #[derive(Deserialize)]
 struct LoginForm { password: String }
 
+//this calls the login.html file btw
 async fn login_form() -> Html<&'static str> {
-    Html(r#"
-    <style>
-body {
-    font-family: Arial, sans-serif;
-    background: #ffffff;
-    max-width: 700px;
-    margin: 40px auto;
-    padding: 20px;
-    border-radius: 8px;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.48);
-}
-h1 { text-align: center; color: #333; }
-p  { text-align: center; color: #333; }
-button {
-    padding: 6px 12px;
-    background: #2f23a0;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-}
-button:hover { background: #6e30ff; }
-ul { list-style: none; padding-left: 0; }
-li { margin: 5px 0; }
-</style>
-    <h2>Enter Password:</h2>
-    <form method="post" action="/login">
-      <input type="password" name="password" placeholder="Secret Password">
-      <button type="submit">Login</button>
-    </form>
-    <h3>rustshare<h3>
-    "#)
+    Html(include_str!("../login.html"))
 }
 
+//this will push the user from /login to the dashboard if the password is correct
 async fn login_submit(
     cookies: tower_cookies::Cookies,
     Form(data): Form<LoginForm>,
@@ -284,9 +303,13 @@ async fn login_submit(
     if data.password == *APP_PASSWORD {
     cookies.add(Cookie::new("auth", "ok"));
     Redirect::to("/")
-} else {
-    Redirect::to("/login")
+} //if the password is wrong, don't go anywhere.
+else {
+    Redirect::to("/login")  //go back to the login :)
+    
 }}
+
+//require the user to have a good login, either by cookies or by the right password.
 async fn require_auth(
     cookies: Cookies,
     req: Request<Body>,
@@ -302,35 +325,63 @@ if cookies
 } else {
     Err(StatusCode::UNAUTHORIZED)
 }}
+
+
 //handles uploads from server -> device..?
 async fn upload(mut multipart: Multipart) -> impl IntoResponse {
     while let Some(mut field) = multipart.next_field().await.unwrap() {
         if let Some(filename) = field.file_name().map(|s| s.to_string()) {
             let path = PathBuf::from("uploads").join(&filename);
-            let mut file = File::create(&path).await.unwrap();
+            //Update from here
+
+            let file = File::create(&path).await.unwrap();
+
+            /*2. Wrap it in a BufWriter with a custom capacity (e.g., 1 Megabyte)
+            MOD THIS!!!!!!
+            1024 * 1024 = 1,048,576 bytes (1 MB)
+            */
+            let chunk_size = CONFIG.upload_speed_bps as usize;
+            let mut buf_writer = BufWriter::with_capacity(chunk_size, file);
+            
             let mut written: u64 = 0;
 
-
-            const MAX_SIZE: u64 = 25024 * 1024 * 1024; // Change this value to change the max file upload size.
-
-
+            // 3. Process the incoming network chunks
             while let Some(chunk) = field.chunk().await.unwrap() {
                 written += chunk.len() as u64;
-                if written > MAX_SIZE {
-                    // Stop if file is too large
+                
+                // Use our new global Lazy config variable instead of the hardcoded one!
+                if written > CONFIG.max_upload_size {
                     return (
                         axum::http::StatusCode::PAYLOAD_TOO_LARGE,
                         "File too big",
                     )
                         .into_response();
                 }
-                file.write_all(&chunk).await.unwrap();
+                // -- APPLYING THE UPLOAD SPEED LIMIT --
+                if CONFIG.upload_speed_bps > 0 {
+                // Calculate how many seconds this specific chunk *should* take to process
+                let seconds_for_chunk = chunk.len() as f64 / CONFIG.upload_speed_bps as f64;
+                let sleep_duration = std::time::Duration::from_secs_f64(seconds_for_chunk);
+        
+                // Force the server to pause, effectively throttling the upload
+                tokio::time::sleep(sleep_duration).await;
             }
+                // Write the network chunk into our RAM buffer. 
+                // It will automatically flush to disk when the 1MB limit is hit.
+                buf_writer.write_all(&chunk).await.unwrap();
+            }
+            
+            // 4. IMPORTANT: Flush the writer!
+            // When the upload finishes, there might be a partially filled buffer 
+            // (e.g., 500KB) still sitting in RAM. This forces it to write to the disk.
+            buf_writer.flush().await.unwrap();
         }
     }
 
     Redirect::to("/").into_response()
 }
+
+//list the files up.
 async fn list_files() -> Json<Vec<String>> {
     let mut names = vec![];
     if let Ok(entries) = fs::read_dir("uploads") {
@@ -342,20 +393,43 @@ async fn list_files() -> Json<Vec<String>> {
     }
     Json(names)
 }
+
 //handles downloads device -> server
+//high level code...
 async fn download(Path(name): Path<String>) -> impl IntoResponse {
     let path = PathBuf::from("uploads").join(&name);
-
+    //the file must exist.
     if !path.exists() {
         return (StatusCode::NOT_FOUND, "File not found").into_response();
     }
-
+    //the file must be accessible.
     let file = match File::open(&path).await {
         Ok(f) => f,
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "Can't open file").into_response(),
     };
 
-    let stream = ReaderStream::new(BufReader::new(file));
+
+    /*-- TAKING CONTROL OF CHUNKING --
+    64 * 1024 = 65,536 bytes (64 KB). 
+    You can increase this (e.g., 1024 * 1024 for 1MB chunks) to speed up LAN transfers
+    at the cost of slightly higher RAM usage per active download.
+    we live in a modern era, so we can have modern RAM usage lol. 
+    Maybe I should add a config for this too??? Is that even.. necessary? imagine I set it to 1MB though
+    That's already a HUGE performance leap. I have to speed test this.
+    Maybe I should add a config file after all. 
+    Using Lazy should provide the easiest method for introducing it,
+     I could modify my config.ini to have a download speed config.
+
+*/
+
+
+    //splitting the file up. MOD ME MOD ME
+    let chunk_size = CONFIG.download_speed_bps as usize; 
+    let buf_reader = BufReader::with_capacity(chunk_size, file);
+    
+
+    //have the stream adapt to the values it is given.
+    let stream = ReaderStream::new(buf_reader);
     let body = Body::from_stream(stream);
 
     // Guess MIME type (or fallback to binary)

@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Rust--Share</title>
+<style>
+body {
+    font-family: Arial, sans-serif;
+    background: #ffffff5e;
+    max-width: 700px;
+    margin: 40px auto;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.14);
+}
+h1 { text-align: center; color: #333; }
+p  { text-align: center; color: #333; }
+button {
+    padding: 6px 12px;
+    background: #2f23a0;
+    color: rgb(255, 255, 255);
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+button:hover { background: #6e30ff; }
+ul { list-style: none; padding-left: 0; }
+li { margin: 5px 0; }
+</style>
+</head>
+<body>
+<h3>Welcome to Rust Share!<h3>
+<p>Upload files below and share them across your network</p>
+
+<h3>Upload a file</h3>
+<form id="upload-form" enctype="multipart/form-data" method="post" action="/upload">
+  <input type="file" name="file" />
+  <button type="submit">Upload</button>
+</form>
+
+<h3>Available Files</h3>
+<ul id="file-list"></ul>
+
+<script>
+async function refreshFiles(){
+  const res = await fetch('/files');
+  const files = await res.json();
+  const list = document.getElementById('file-list');
+  list.innerHTML = '';
+  files.forEach(name=>{
+    const li = document.createElement('li');
+    li.innerHTML = `<a href="/download/${name}">${name}</a>`;
+    list.appendChild(li);
+  });
+}
+refreshFiles();
+</script>
+<h3>Written by Bunto-man on Github<h3>
+<p>https://github.com/Bunto-man/<p>
+</body>
+</html>
