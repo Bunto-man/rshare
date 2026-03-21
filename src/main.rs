@@ -1,10 +1,12 @@
 use core::f64;
+use chrono;
 use std::{
     env,
     fs,
     net::{SocketAddr, UdpSocket},
     path::PathBuf,
-    io::{self, Write}
+    io::{self, Write},
+    
 };//standard
 use axum_server::tls_rustls::RustlsConfig;
 use once_cell::sync::Lazy;
@@ -54,7 +56,7 @@ static CONFIG: Lazy<AppConfig> = Lazy::new(|| {
         //now it should be able to parse itself...
         writeln!(file, "[Settings]").unwrap();
         writeln!(file, "# Set max upload size in bytes. 1024*1024*1024 = 1GB").unwrap();
-        writeln!(file, "default is 1024*1024*1024 bytes").unwrap();
+        writeln!(file, "# default is 1024*1024*1024 bytes").unwrap();
         writeln!(file, "file_Size=1024*1024*1024").unwrap();
         writeln!(file, "# Set max upload/download speed in bytes per second (0 = unlimited), 1024*1024 = 1MB Default").unwrap();
         writeln!(file, "upload_speed=1024*1024").unwrap();
@@ -202,7 +204,10 @@ fn get_local_ip() -> Option<String> {
     sock.connect("8.8.8.8:80").ok()?;//gives a default connection I think
     Some(sock.local_addr().ok()?.ip().to_string())//strings the IP
 }
-
+fn get_time() -> String{
+    let time = chrono::offset::Local::now().to_string();
+    return time;
+}
 
 
 #[tokio::main]
@@ -222,6 +227,7 @@ async fn main() {
         eprintln!("Error setting password: {}", e);
         return;
     }
+
     //define the routes that the "website" allows
     let protected_routes = Router::new()
         .route("/", get(index)) //the main dashboard
@@ -233,7 +239,7 @@ async fn main() {
         .layer(DefaultBodyLimit::max(CONFIG.max_upload_size as usize))
         
         .route_layer(middleware::from_fn(require_auth));
-
+        
     let app = Router::new()
     .route("/login", get(login_form).post(login_submit))
     .merge(protected_routes)
@@ -263,7 +269,8 @@ async fn main() {
     let pretty_max_size = CONFIG.max_upload_size as f64 / (1024.0*1024.0*1024.0);
     let pretty_upload_speed =CONFIG.upload_speed_bps as f64 / (1024.0*1024.0);
     let pretty_download_speed =CONFIG.upload_speed_bps as f64 / (1024.0*1024.0);
-    println!("Upload Speed : {:.2}MB/s || Download Speed : {:.2}MB/s",pretty_upload_speed,pretty_download_speed);
+    println!("\n   Upload Speed : {:.2}MB/s || Download Speed : {:.2}MB/s",pretty_upload_speed,pretty_download_speed);
+    println!("~-------------------------------------------------------------------------------------~");
     println!("-~ Max File Size Set To {:.2} GB. This Can Be Changed In Config.ini ~-",pretty_max_size);
 
     // 2. Bind using axum-server with the TLS config
@@ -286,7 +293,7 @@ async fn index() -> Html<&'static str> {
     Html(include_str!("../index.html"))
 }
 
-
+//this is a struct for the password.
 #[derive(Deserialize)]
 struct LoginForm { password: String }
 
@@ -294,19 +301,24 @@ struct LoginForm { password: String }
 async fn login_form() -> Html<&'static str> {
     Html(include_str!("../login.html"))
 }
-
-//this will push the user from /login to the dashboard if the password is correct
 async fn login_submit(
     cookies: tower_cookies::Cookies,
     Form(data): Form<LoginForm>,
 ) -> Redirect {
+    
     if data.password == *APP_PASSWORD {
     cookies.add(Cookie::new("auth", "ok"));
-    Redirect::to("/")
-} //if the password is wrong, don't go anywhere.
-else {
-    Redirect::to("/login")  //go back to the login :)
+    //------------------------------------------------------------------------------------------------------
+    println!("System connected User to dashboard on {}",get_time());
     
+    Redirect::to("/")
+    }
+    //try to incorporate an Anti Bruteforce technique?
+else {
+    
+    println!("Password Guessed incorrectly.");
+    
+    Redirect::to("/login")  //go back to the login :)
 }}
 
 //require the user to have a good login, either by cookies or by the right password.
@@ -321,13 +333,16 @@ if cookies
     .map(|c| c.value() == "ok")
     .unwrap_or(false)
 {
+     println!("User Re-entered the dashboard using cookies on {}",get_time());
     Ok(next.run(req).await)
 } else {
+    println!("System denied forceful entry on {}",get_time());
     Err(StatusCode::UNAUTHORIZED)
 }}
 
 
 //handles uploads from server -> device..?
+//better control over this than downloading
 async fn upload(mut multipart: Multipart) -> impl IntoResponse {
     while let Some(mut field) = multipart.next_field().await.unwrap() {
         if let Some(filename) = field.file_name().map(|s| s.to_string()) {
@@ -377,7 +392,7 @@ async fn upload(mut multipart: Multipart) -> impl IntoResponse {
             buf_writer.flush().await.unwrap();
         }
     }
-
+    println!("User uploaded to the dashboard on {}",get_time());
     Redirect::to("/").into_response()
 }
 
@@ -423,8 +438,8 @@ async fn download(Path(name): Path<String>) -> impl IntoResponse {
 */
 
 
-    //splitting the file up. MOD ME MOD ME
-    let chunk_size = CONFIG.download_speed_bps as usize; 
+    //splitting the file up.
+    let chunk_size = CONFIG.download_speed_bps as usize; //now controlled properly
     let buf_reader = BufReader::with_capacity(chunk_size, file);
     
 
@@ -444,6 +459,8 @@ async fn download(Path(name): Path<String>) -> impl IntoResponse {
         header::CONTENT_DISPOSITION,
         format!("attachment; filename=\"{}\"", name).parse().unwrap(),
     );
-
+    //give the terminal some feedback for downloads
+    println!("User downloaded from the dashboard on {}",get_time());
     (headers, body).into_response()
+    
 }
