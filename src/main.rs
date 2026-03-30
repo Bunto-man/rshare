@@ -89,7 +89,12 @@ static CONFIG: Lazy<AppConfig> = Lazy::new(|| {
     
     current_config
 });
-    //this function handles the multipliers
+    ///This function parses the math strings found in the config
+    /// 
+    /// * `input` - the input string from the config file
+    /// * `default_size` - The default size made by me. it can be found in the AppConfig as a default.
+    /// * `parsed_anything` - The boolean that asks if the program could actually read the string from the user
+    /// * `total` - The u64 value returned if the function works and returns a proper value.
   fn parse_math_string(input: &str, default_size: u64) -> u64 {
     let mut total: u64 = 1;
     let mut parsed_anything = false;
@@ -127,8 +132,13 @@ static CONFIG: Lazy<AppConfig> = Lazy::new(|| {
 }
 
 
-
-//Help generate keys to use HTTPS
+///Ensures certificates for HTTPS by looking for certificates, and creating them if they don't exist.
+///  - This is necessary for initialization
+/// 
+/// * `cert_path` - The path of the certificates
+/// * `key_path` - The path of the key
+/// * `pem_serialized` - the serialied cerificate
+/// * `key_serialized` - the serialied key
 fn ensure_certificates() -> Result<(), Box<dyn std::error::Error>> {
     let cert_path = PathBuf::from("cert.pem");
     let key_path = PathBuf::from("key.pem");
@@ -146,7 +156,7 @@ fn ensure_certificates() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ip) = get_local_ip() {
         params.subject_alt_names.push(rcgen::SanType::IpAddress(ip.parse()?));
     }
-    //define and write your certificates
+    //define and write certificates
     let cert = rcgen::Certificate::from_params(params)?;
 
     //should these be put into a struct? will that save on memory?
@@ -160,6 +170,11 @@ fn ensure_certificates() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+///Ensures the password file exists, creating it if not
+/// 
+/// * `env_path` - the path of the PASSWORD.env file
+/// * `new_password` - The new password string
+/// * `content` - represents the new_password in a format readily written to a fresh PASSWORD.env file
 fn ensure_password() -> Result<(), Box<dyn std::error::Error>> {
     //ensure the passwords are there.
     let env_path = PathBuf::from("PASSWORD.env");
@@ -176,7 +191,7 @@ fn ensure_password() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut new_password = String::new();
     io::stdin().read_line(&mut new_password)?;
-    let new_password = new_password.trim(); // Remove the newline character (needed?!)
+    let new_password = new_password.trim(); // Remove the newline character (needed because of the enter button pressed.)
 
     //cheeky error message
     if new_password.is_empty() {
@@ -197,13 +212,21 @@ fn ensure_password() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 
-//get the local IP
+
 use serde::Deserialize;
+///Grabs the local IP to bind the socket
+/// 
+/// * `sock` - the IP address of the computer
+/// * `Option<String>` - the string of "sock"
 fn get_local_ip() -> Option<String> {
     let sock = UdpSocket::bind("0.0.0.0:0").ok()?;//connects to the IP address of the user (this computer)
-    sock.connect("8.8.8.8:80").ok()?;//gives a default connection I think
+    sock.connect("8.8.8.8:80").ok()?;
     Some(sock.local_addr().ok()?.ip().to_string())//strings the IP
 }
+
+///Returns the current time of user
+/// 
+/// * `time` - The local time of the user in string
 fn get_time() -> String{
     let time = chrono::offset::Local::now().to_string();
     return time;
@@ -281,26 +304,32 @@ async fn main() {
 }
 
 
-//Call the app password file, called PASSWORD.env
+///Call the app password file, called PASSWORD.env
 static APP_PASSWORD: Lazy<String> = Lazy::new(|| {
     dotenvy::from_filename("PASSWORD.env").ok(); // load file
     env::var("APP_PASSWORD").expect("APP_PASSWORD not set")
 });
 
 
-//The HTML Code. keep it minimal. This calls for the index.html
+///calls for the index.html
 async fn index() -> Html<&'static str> {
     Html(include_str!("../index.html"))
 }
 
-//this is a struct for the password.
+///this is a struct for the password.
 #[derive(Deserialize)]
 struct LoginForm { password: String }
 
-//this calls the login.html file btw
+///calls the login.html
 async fn login_form() -> Html<&'static str> {
     Html(include_str!("../login.html"))
 }
+
+///handles the login function of the software
+/// 
+/// * `cookies` - The cookies for the session
+/// * Returns feedback for correct and incorrect logins.
+/// * `data.password` - the password returned from the login.html
 async fn login_submit(
     cookies: tower_cookies::Cookies,
     Form(data): Form<LoginForm>,
@@ -321,7 +350,8 @@ else {
     Redirect::to("/login")  //go back to the login :)
 }}
 
-//require the user to have a good login, either by cookies or by the right password.
+///accept or reject users based on login or cookies.
+/// 
 async fn require_auth(
     cookies: Cookies,
     req: Request<Body>,
@@ -333,7 +363,7 @@ if cookies
     .map(|c| c.value() == "ok")
     .unwrap_or(false)
 {
-     println!("User Re-entered the dashboard using cookies on {}",get_time());
+    println!("User Re-entered the dashboard using cookies on {}",get_time());
     Ok(next.run(req).await)
 } else {
     println!("System denied forceful entry on {}",get_time());
@@ -341,20 +371,19 @@ if cookies
 }}
 
 
-//handles uploads from server -> device..?
-//better control over this than downloading
+///handles uploads from server to device
+/// 
+/// * `file` - new user file
+/// * `path` - the path to the new upload. located in the uploads folder.
+/// * `chunk_size` - the speed from config file
+/// 
+
 async fn upload(mut multipart: Multipart) -> impl IntoResponse {
     while let Some(mut field) = multipart.next_field().await.unwrap() {
         if let Some(filename) = field.file_name().map(|s| s.to_string()) {
             let path = PathBuf::from("uploads").join(&filename);
-            //Update from here
-
+            
             let file = File::create(&path).await.unwrap();
-
-            /*2. Wrap it in a BufWriter with a custom capacity (e.g., 1 Megabyte)
-            MOD THIS!!!!!!
-            1024 * 1024 = 1,048,576 bytes (1 MB)
-            */
             let chunk_size = CONFIG.upload_speed_bps as usize;
             let mut buf_writer = BufWriter::with_capacity(chunk_size, file);
             
@@ -396,7 +425,9 @@ async fn upload(mut multipart: Multipart) -> impl IntoResponse {
     Redirect::to("/").into_response()
 }
 
-//list the files up.
+///list the files
+/// 
+/// * `names` - the string of the names of the files in the upload folder.
 async fn list_files() -> Json<Vec<String>> {
     let mut names = vec![];
     if let Ok(entries) = fs::read_dir("uploads") {
