@@ -384,38 +384,51 @@ if cookies
 /// * `file` - new user file
 /// * `path` - the path to the new upload. located in the uploads folder.
 /// * `chunk_size` - the speed from config file
+/// * `headers` - Give the ability to grab the size of the file before writing.
 /// 
-async fn upload(mut multipart: Multipart) -> impl IntoResponse {
-    while let Some(mut field) = multipart.next_field().await.unwrap() {
-        if let Some(filename) = field.file_name().map(|s| s.to_string()) {
+async fn upload(headers: HeaderMap, mut multipart: Multipart) -> impl IntoResponse {
 
-            let file_name= field.file_name().map(|s| s.to_string());
-            let name_of_file = file_name.unwrap();
-            
-            let path = PathBuf::from("uploads").join(&filename);
-            
-            let file = File::create(&path).await.unwrap();
-            let chunk_size = CONFIG.upload_speed_bps as usize;
-            let mut buf_writer = BufWriter::with_capacity(chunk_size, file);
-            
-            let mut written: u64 = 0;
-            println!("\nBeginning Upload Now...");
-            // 3. Process the incoming network chunks
-            while let Some(chunk) = field.chunk().await.unwrap() {
-                written += chunk.len() as u64;
-                //added a progress tracker here.
-            use std::io::Write; // Required for the flush() command below
-                print!("\rUploading '{}' || {} Megabytes Written",name_of_file,written/(1024*1024));
-            //update the terminal immediately.
-            std::io::stdout().flush().unwrap(); 
+    let total_request_size: u64 = headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|val| val.to_str().ok())
+        .and_then(|val| val.parse().ok())
+        .unwrap_or(0);
 
-                if written > CONFIG.max_upload_size {
+        if total_request_size > CONFIG.max_upload_size {
                     return (
                         axum::http::StatusCode::PAYLOAD_TOO_LARGE,
                         "File too big",
                     )
                         .into_response();
                 }
+
+    while let Some(mut field) = multipart.next_field().await.unwrap() {
+        if let Some(filename) = field.file_name().map(|s| s.to_string()) {
+
+            let file_name= field.file_name().map(|s| s.to_string());
+            let name_of_file = file_name.unwrap();
+    
+            let path = PathBuf::from("uploads").join(&filename);
+            let file = File::create(&path).await.unwrap();
+            let chunk_size = CONFIG.upload_speed_bps as usize;
+            let mut buf_writer = BufWriter::with_capacity(chunk_size, file);
+            let mut written: u64 = 0;
+            println!("\nBeginning Upload Now...");
+            //println!("File size: {}",total_request_size);
+            // 3. Process the incoming network chunks
+            while let Some(chunk) = field.chunk().await.unwrap() {
+                written += chunk.len() as u64;
+                //added a progress tracker here.
+            use std::io::Write; // Required for the flush() command below
+
+                let write_size = written as f64/(1024.0*1024.0);
+                let percentage = (written as f64/total_request_size as f64)*100.0;
+
+                print!("\rUploading '{}' || {:.2} Megabytes Written  {:.2}%",name_of_file,write_size,percentage);
+            //update the terminal immediately.
+            std::io::stdout().flush().unwrap(); 
+
+                
                 // -- APPLYING THE UPLOAD SPEED LIMIT --
                 if CONFIG.upload_speed_bps > 0 {
                 // Calculate how many seconds this specific chunk *should* take to process
@@ -434,6 +447,7 @@ async fn upload(mut multipart: Multipart) -> impl IntoResponse {
             // When the upload finishes, there might be a partially filled buffer 
             // (e.g., 500KB) still sitting in RAM. This forces it to write to the disk.
             buf_writer.flush().await.unwrap();
+            
             //added some pretty diagnostic stuff.
             println!("\nUser uploaded '{}' to the dashboard on {}",name_of_file,get_time());
         }
