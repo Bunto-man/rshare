@@ -186,7 +186,7 @@ fn ensure_password() -> Result<(), Box<dyn std::error::Error>> {
     println!("!--------------------------------------------------!");
     println!("First time setup: No password found.");
     println!("Please enter a password for rShare: ");
-    println!("?--------------------------------------------------?");
+    println!("?--------------------------------------------------?\n");
     io::stdout().flush()?; // Ensure the prompt prints immediately
 
     let mut new_password = String::new();
@@ -203,7 +203,7 @@ fn ensure_password() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(&env_path, content)?;
 
     println!("Password saved to 'PASSWORD.env'.");
-    println!("~--------------------------------------------------~");
+    println!("~--------------------------------------------------~\n");
     
     // load the env file immediately.
     dotenvy::from_filename("PASSWORD.env").ok();
@@ -227,8 +227,10 @@ fn get_local_ip() -> Option<String> {
 ///Returns the current time of user
 /// 
 /// * `time` - The local time of the user in string
+/// Changed to only grab the first 19 Characters in order to stop the time stamp from being too accurate and annoying.
 fn get_time() -> String{
-    let time = chrono::offset::Local::now().to_string();
+    let mut time = chrono::offset::Local::now().to_string();
+    time.truncate(19);
     return time;
 }
 
@@ -292,10 +294,17 @@ async fn main() {
     let pretty_max_size = CONFIG.max_upload_size as f64 / (1024.0*1024.0*1024.0);
     let pretty_upload_speed =CONFIG.upload_speed_bps as f64 / (1024.0*1024.0);
     let pretty_download_speed =CONFIG.upload_speed_bps as f64 / (1024.0*1024.0);
-    println!("\n   Upload Speed : {:.2}MB/s || Download Speed : {:.2}MB/s",pretty_upload_speed,pretty_download_speed);
-    println!("~-------------------------------------------------------------------------------------~");
-    println!("-~ Max File Size Set To {:.2} GB. This Can Be Changed In Config.ini ~-",pretty_max_size);
 
+    println!("\n   Upload Speed : {:.2}MB/s || Download Speed : {:.2}MB/s",pretty_upload_speed,pretty_download_speed);
+    println!("-~ Max File Size Set To {:.2} GB | This Can Be Changed In Config.ini ~-\n",pretty_max_size);
+
+    //give a special message if upload or download are maximum.
+    if pretty_upload_speed ==0.0{
+    println!("!~`Upload Speed is set to Maximum`~!");
+    }if pretty_download_speed ==0.0{
+    println!("!~`Download Speed is set to Maximum`~!");
+    }
+    println!("~-------------------------------------------------------------------------------------~");
     // 2. Bind using axum-server with the TLS config
     axum_server::bind_rustls(addr, config)
         .serve(app.into_make_service())
@@ -338,14 +347,14 @@ async fn login_submit(
     if data.password == *APP_PASSWORD {
     cookies.add(Cookie::new("auth", "ok"));
     //------------------------------------------------------------------------------------------------------
-    println!("System connected User to dashboard on {}",get_time());
+    println!("Connected User to dashboard on {}",get_time());
     
     Redirect::to("/")
     }
     //try to incorporate an Anti Bruteforce technique?
 else {
     
-    println!("Password Guessed incorrectly.");
+    println!("Password incorrect.");
     
     Redirect::to("/login")  //go back to the login :)
 }}
@@ -363,7 +372,6 @@ if cookies
     .map(|c| c.value() == "ok")
     .unwrap_or(false)
 {
-    println!("User Re-entered the dashboard using cookies on {}",get_time());
     Ok(next.run(req).await)
 } else {
     println!("System denied forceful entry on {}",get_time());
@@ -377,10 +385,13 @@ if cookies
 /// * `path` - the path to the new upload. located in the uploads folder.
 /// * `chunk_size` - the speed from config file
 /// 
-
 async fn upload(mut multipart: Multipart) -> impl IntoResponse {
     while let Some(mut field) = multipart.next_field().await.unwrap() {
         if let Some(filename) = field.file_name().map(|s| s.to_string()) {
+
+            let file_name= field.file_name().map(|s| s.to_string());
+            let name_of_file = file_name.unwrap();
+            
             let path = PathBuf::from("uploads").join(&filename);
             
             let file = File::create(&path).await.unwrap();
@@ -388,12 +399,16 @@ async fn upload(mut multipart: Multipart) -> impl IntoResponse {
             let mut buf_writer = BufWriter::with_capacity(chunk_size, file);
             
             let mut written: u64 = 0;
-
+            println!("\nBeginning Upload Now...");
             // 3. Process the incoming network chunks
             while let Some(chunk) = field.chunk().await.unwrap() {
                 written += chunk.len() as u64;
-                
-                // Use our new global Lazy config variable instead of the hardcoded one!
+                //added a progress tracker here.
+            use std::io::Write; // Required for the flush() command below
+                print!("\rUploading '{}' || {} Megabytes Written",name_of_file,written/(1024*1024));
+            //update the terminal immediately.
+            std::io::stdout().flush().unwrap(); 
+
                 if written > CONFIG.max_upload_size {
                     return (
                         axum::http::StatusCode::PAYLOAD_TOO_LARGE,
@@ -419,9 +434,10 @@ async fn upload(mut multipart: Multipart) -> impl IntoResponse {
             // When the upload finishes, there might be a partially filled buffer 
             // (e.g., 500KB) still sitting in RAM. This forces it to write to the disk.
             buf_writer.flush().await.unwrap();
+            //added some pretty diagnostic stuff.
+            println!("\nUser uploaded '{}' to the dashboard on {}",name_of_file,get_time());
         }
     }
-    println!("User uploaded to the dashboard on {}",get_time());
     Redirect::to("/").into_response()
 }
 
@@ -446,12 +462,14 @@ async fn download(Path(name): Path<String>) -> impl IntoResponse {
     let path = PathBuf::from("uploads").join(&name);
     //the file must exist.
     if !path.exists() {
+        println!("ERROR! Path does not exist!\n");
         return (StatusCode::NOT_FOUND, "File not found").into_response();
     }
     //the file must be accessible.
     let file = match File::open(&path).await {
         Ok(f) => f,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "Can't open file").into_response(),
+        Err(_) => {println!("ERROR! File not Accessible!\n");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Can't open file").into_response()}, 
     };
 
 
@@ -491,7 +509,7 @@ async fn download(Path(name): Path<String>) -> impl IntoResponse {
         format!("attachment; filename=\"{}\"", name).parse().unwrap(),
     );
     //give the terminal some feedback for downloads
-    println!("User downloaded from the dashboard on {}",get_time());
+    println!("User downloaded '{}' from the dashboard on {}",name,get_time());
     (headers, body).into_response()
     
 }
