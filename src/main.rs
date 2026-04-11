@@ -57,10 +57,10 @@ static CONFIG: Lazy<AppConfig> = Lazy::new(|| {
         writeln!(file, "[Settings]").unwrap();
         writeln!(file, "# Set max upload size in bytes. 1024*1024*1024 = 1GB").unwrap();
         writeln!(file, "# default is 1024*1024*1024 bytes").unwrap();
-        writeln!(file, "file_Size=1024*1024*1024").unwrap();
         writeln!(file, "# Set max upload/download speed in bytes per second (0 = unlimited), 1024*1024 = 1MB Default").unwrap();
-        writeln!(file, "upload_speed=1024*1024").unwrap();
-        writeln!(file, "download_speed=1024*1024").unwrap();
+        writeln!(file, "file_Size= 1024*1024*1024").unwrap();
+        writeln!(file, "upload_speed= 1024*1024").unwrap();
+        writeln!(file, "download_speed= 1024*1024").unwrap();
         
         return current_config;
     }
@@ -73,17 +73,22 @@ static CONFIG: Lazy<AppConfig> = Lazy::new(|| {
     for line in content.lines() {
         // Ignore lines that start with '#' (comments)
         if line.trim().starts_with('#') {
+            //println!("trimmer works");
             continue; 
         }
 
         if let Some(val) = line.strip_prefix("file_Size=") {
+            //println!("eval upload size");
             current_config.max_upload_size = parse_math_string(val, current_config.max_upload_size);
             
         } else if let Some(val) = line.strip_prefix("upload_speed=") {
+            //println!("eval upload speed");
             current_config.upload_speed_bps = parse_math_string(val, current_config.upload_speed_bps);
             
         } else if let Some(val) = line.strip_prefix("download_speed=") {
+            //println!("eval download speed");
             current_config.download_speed_bps = parse_math_string(val, current_config.download_speed_bps);
+            //println!("download speed {}",current_config.download_speed_bps);
         }
     }
     
@@ -98,7 +103,6 @@ static CONFIG: Lazy<AppConfig> = Lazy::new(|| {
   fn parse_math_string(input: &str, default_size: u64) -> u64 {
     let mut total: u64 = 1;
     let mut parsed_anything = false;
-
     // Split the string by the asterisk
     for part in input.split('*') {
         let clean_part = part.trim();
@@ -113,7 +117,10 @@ static CONFIG: Lazy<AppConfig> = Lazy::new(|| {
             Ok(num) => {
                 // saturating_mul prevents the server from crashing if a user 
                 // types a number so big it overflows Rust's u64 limit!
+                
                 total = total.saturating_mul(num);
+                //println!("cleanpart true {}",total);
+                //println!("{}",default_size);
                 parsed_anything = true;
             }
             Err(_) => {
@@ -252,7 +259,8 @@ async fn main() {
         eprintln!("Error setting password: {}", e);
         return;
     }
-
+    //implement fail tracker?
+    
     //define the routes that the "website" allows
     let protected_routes = Router::new()
         .route("/", get(index)) //the main dashboard
@@ -293,15 +301,15 @@ async fn main() {
 
     let pretty_max_size = CONFIG.max_upload_size as f64 / (1024.0*1024.0*1024.0);
     let pretty_upload_speed =CONFIG.upload_speed_bps as f64 / (1024.0*1024.0);
-    let pretty_download_speed =CONFIG.upload_speed_bps as f64 / (1024.0*1024.0);
+    let pretty_download_speed =CONFIG.download_speed_bps as f64 / (1024.0*1024.0);
 
     println!("\n   Upload Speed : {:.2}MB/s || Download Speed : {:.2}MB/s",pretty_upload_speed,pretty_download_speed);
     println!("-~ Max File Size Set To {:.2} GB | This Can Be Changed In Config.ini ~-\n",pretty_max_size);
 
     //give a special message if upload or download are maximum.
-    if pretty_upload_speed ==0.0{
+    if pretty_upload_speed <=0.0{
     println!("!~`Upload Speed is set to Maximum`~!");
-    }if pretty_download_speed ==0.0{
+    }if pretty_download_speed <=0.0{
     println!("!~`Download Speed is set to Maximum`~!");
     }
     println!("~-------------------------------------------------------------------------------------~");
@@ -341,7 +349,7 @@ async fn login_form() -> Html<&'static str> {
 /// * `data.password` - the password returned from the login.html
 async fn login_submit(
     cookies: tower_cookies::Cookies,
-    Form(data): Form<LoginForm>,
+    Form(data): Form<LoginForm>, 
 ) -> Redirect {
     
     if data.password == *APP_PASSWORD {
@@ -395,6 +403,7 @@ async fn upload(headers: HeaderMap, mut multipart: Multipart) -> impl IntoRespon
         .unwrap_or(0);
 
         if total_request_size > CONFIG.max_upload_size {
+                    println!("file too large.");
                     return (
                         axum::http::StatusCode::PAYLOAD_TOO_LARGE,
                         "File too big",
@@ -414,7 +423,8 @@ async fn upload(headers: HeaderMap, mut multipart: Multipart) -> impl IntoRespon
             let mut buf_writer = BufWriter::with_capacity(chunk_size, file);
             let mut written: u64 = 0;
             println!("\nBeginning Upload Now...");
-            //println!("File size: {}",total_request_size);
+            //println!("Size : {:.1} MB",(total_request_size as f64)/(1024.0*1024.0));
+            
             // 3. Process the incoming network chunks
             while let Some(chunk) = field.chunk().await.unwrap() {
                 written += chunk.len() as u64;
@@ -424,28 +434,29 @@ async fn upload(headers: HeaderMap, mut multipart: Multipart) -> impl IntoRespon
                 let write_size = written as f64/(1024.0*1024.0);
                 let percentage = (written as f64/total_request_size as f64)*100.0;
 
-                print!("\rUploading '{}' || {:.2} Megabytes Written  {:.2}%",name_of_file,write_size,percentage);
-            //update the terminal immediately.
-            std::io::stdout().flush().unwrap(); 
+                 
 
                 
                 // -- APPLYING THE UPLOAD SPEED LIMIT --
                 if CONFIG.upload_speed_bps > 0 {
-                // Calculate how many seconds this specific chunk *should* take to process
+                
                 let seconds_for_chunk = chunk.len() as f64 / CONFIG.upload_speed_bps as f64;
                 let sleep_duration = std::time::Duration::from_secs_f64(seconds_for_chunk);
         
                 // Force the server to pause, effectively throttling the upload
                 tokio::time::sleep(sleep_duration).await;
             }
-                // Write the network chunk into our RAM buffer. 
-                // It will automatically flush to disk when the 1MB limit is hit.
+                // Write the network chunk into RAM buffer. 
                 buf_writer.write_all(&chunk).await.unwrap();
+                print!("\rUploading '{}' || {:.2} Megabytes Written  {:.2}%",name_of_file,write_size,percentage);
+                //update the terminal immediately.
+                std::io::stdout().flush().unwrap();
             }
             
             // 4. IMPORTANT: Flush the writer!
             // When the upload finishes, there might be a partially filled buffer 
             // (e.g., 500KB) still sitting in RAM. This forces it to write to the disk.
+            
             buf_writer.flush().await.unwrap();
             
             //added some pretty diagnostic stuff.
@@ -486,33 +497,15 @@ async fn download(Path(name): Path<String>) -> impl IntoResponse {
         return (StatusCode::INTERNAL_SERVER_ERROR, "Can't open file").into_response()}, 
     };
 
-
-    /*-- TAKING CONTROL OF CHUNKING --
-    64 * 1024 = 65,536 bytes (64 KB). 
-    You can increase this (e.g., 1024 * 1024 for 1MB chunks) to speed up LAN transfers
-    at the cost of slightly higher RAM usage per active download.
-    we live in a modern era, so we can have modern RAM usage lol. 
-    Maybe I should add a config for this too??? Is that even.. necessary? imagine I set it to 1MB though
-    That's already a HUGE performance leap. I have to speed test this.
-    Maybe I should add a config file after all. 
-    Using Lazy should provide the easiest method for introducing it,
-     I could modify my config.ini to have a download speed config.
-
-*/
-
-
     //splitting the file up.
     let chunk_size = CONFIG.download_speed_bps as usize; //now controlled properly
     let buf_reader = BufReader::with_capacity(chunk_size, file);
-    
-
     //have the stream adapt to the values it is given.
     let stream = ReaderStream::new(buf_reader);
     let body = Body::from_stream(stream);
 
     // Guess MIME type (or fallback to binary)
     let mime = mime_guess::from_path(&path).first_or_octet_stream();
-
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
