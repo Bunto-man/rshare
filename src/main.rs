@@ -362,7 +362,7 @@ async fn login_submit(
     //try to incorporate an Anti Bruteforce technique?
 else {
     
-    println!("Password incorrect.");
+    println!("Password '{}' is incorrect.",data.password);
     
     Redirect::to("/login")  //go back to the login :)
 }}
@@ -411,6 +411,8 @@ async fn upload(headers: HeaderMap, mut multipart: Multipart) -> impl IntoRespon
                         .into_response();
                 }
 
+                let mut global_written : u64 = 0; //this is to keep everything normal
+
     while let Some(mut field) = multipart.next_field().await.unwrap() {
         if let Some(filename) = field.file_name().map(|s| s.to_string()) {
 
@@ -421,22 +423,18 @@ async fn upload(headers: HeaderMap, mut multipart: Multipart) -> impl IntoRespon
             let file = File::create(&path).await.unwrap();
             let chunk_size = CONFIG.upload_speed_bps as usize;
             let mut buf_writer = BufWriter::with_capacity(chunk_size, file);
-            let mut written: u64 = 0;
+            //let mut written: u64 = 0;
             println!("\nBeginning Upload Now...");
-            //println!("Size : {:.1} MB",(total_request_size as f64)/(1024.0*1024.0));
             
             // 3. Process the incoming network chunks
             while let Some(chunk) = field.chunk().await.unwrap() {
-                written += chunk.len() as u64;
+                global_written += chunk.len() as u64;
                 //added a progress tracker here.
             use std::io::Write; // Required for the flush() command below
 
-                let write_size = written as f64/(1024.0*1024.0);
-                let percentage = (written as f64/total_request_size as f64)*100.0;
+                let write_size = global_written as f64/(1024.0*1024.0);
+                let percentage = (global_written as f64/total_request_size as f64)*100.0;
 
-                 
-
-                
                 // -- APPLYING THE UPLOAD SPEED LIMIT --
                 if CONFIG.upload_speed_bps > 0 {
                 
