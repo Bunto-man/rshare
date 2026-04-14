@@ -1,3 +1,6 @@
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use core::f64;
 use chrono;
 use std::{
@@ -6,11 +9,13 @@ use std::{
     net::{SocketAddr, UdpSocket},
     path::PathBuf,
     io::{self, Write},
+    time::Instant,
     
 };//standard
 use axum_server::tls_rustls::RustlsConfig;
 use once_cell::sync::Lazy;
 use mime_guess;
+use tower::ServiceBuilder;
 use tower_cookies::{Cookies, Cookie, CookieManagerLayer};
 use tokio::{
     fs::File,
@@ -21,7 +26,7 @@ use tokio_util::io::ReaderStream;
 use axum::{
     body::Body,
     extract::{Multipart, Path, DefaultBodyLimit},
-    http::{Request,header, HeaderMap, StatusCode},
+    http::{Request,header, HeaderMap, StatusCode,HeaderValue},
     middleware::Next,
     middleware,
     response::{Html, IntoResponse, Redirect,Response},
@@ -244,8 +249,10 @@ fn get_time() -> String{
 
 #[tokio::main]
 async fn main() {
+    // [Optional but highly recommended] 
+    // Initialize async tracing here in the future:
+    // tracing_subscriber::fmt::init();
     
-    //1. Create uploads folder immediately (could go later but nahhh)
     std::fs::create_dir_all("uploads").expect("Failed to create uploads folder");
     
     // 2. Ensure certificates exist before starting the router.
@@ -259,7 +266,7 @@ async fn main() {
         eprintln!("Error setting password: {}", e);
         return;
     }
-    //implement fail tracker?
+   
     
     //define the routes that the "website" allows
     let protected_routes = Router::new()
@@ -268,15 +275,21 @@ async fn main() {
         .route("/files", get(list_files)) //the files
         .route("/download/{name}", get(download)) 
 
-        //1024*1024*1024 is 1gb, so change to what you want, if it's safe to do so. This changes the max size the user can upload to hostPC
-        .layer(DefaultBodyLimit::max(CONFIG.max_upload_size as usize))
-        
-        .route_layer(middleware::from_fn(require_auth));
-        
+        .layer(
+            ServiceBuilder::new()
+
+            .layer(middleware::from_fn(require_auth))
+
+
+            //after everything.
+            .layer(DefaultBodyLimit::max(CONFIG.max_upload_size as usize))
+        );
+        //.route_layer(middleware::from_fn(require_auth));
+    
     let app = Router::new()
-    .route("/login", get(login_form).post(login_submit))
-    .merge(protected_routes)
-    .layer(CookieManagerLayer::new());
+        .route("/login", get(login_form).post(login_submit))
+        .merge(protected_routes)
+        .layer(CookieManagerLayer::new());
 
         // 1. Load the certificate and private key
         // Ensure cert.pem and key.pem are GENERATED!
@@ -287,12 +300,11 @@ async fn main() {
     .await
     .expect("Failed to load TLS certificates! Run the openssl command first.");
 
-
     let lan_ip = get_local_ip().unwrap_or_else(|| "unknown".into());
     let port = 8080;
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 
-   println!(" rShare running (HTTPS):");
+    println!(" rShare running (HTTPS):");
     println!("  Local  -> https://localhost:{}/login", port);
     println!("  LAN    -> https://{}:{}/login", lan_ip, port);
     println!("  !Note: Accept the browser warning to proceed, connection is secure!");
@@ -307,14 +319,26 @@ async fn main() {
     println!("-~ Max File Size Set To {:.2} GB | This Can Be Changed In Config.ini ~-\n",pretty_max_size);
 
     //give a special message if upload or download are maximum.
-    if pretty_upload_speed <=0.0{
-    println!("!~`Upload Speed is set to Maximum`~!");
-    }if pretty_download_speed <=0.0{
-    println!("!~`Download Speed is set to Maximum`~!");
+    if pretty_upload_speed <=0.0{println!("!~`Upload Speed is set to Maximum`~!");
+    }if pretty_download_speed <=0.0{println!("!~`Download Speed is set to Maximum`~!");
     }
-    println!("~-------------------------------------------------------------------------------------~");
+    println!("-------------------------------------------------------------------------------------");
+
+    //new stuff: 
+    let handle = axum_server::Handle::new();
+    let shutdown_handle = handle.clone();
+
+    tokio::spawn(async move {
+        // Wait for the user to press Ctrl+C
+        tokio::signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
+        println!("\n[System] Gracefully shutting down rShare...");
+    
+        // Give the server time to shut down gracefully.
+        shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(15)));
+    });
     // 2. Bind using axum-server with the TLS config
     axum_server::bind_rustls(addr, config)
+        .handle(handle)
         .serve(app.into_make_service())
         .await
         .unwrap();
@@ -397,6 +421,7 @@ if cookies
 async fn upload(headers: HeaderMap, mut multipart: Multipart) -> impl IntoResponse {
 
     let total_request_size: u64 = headers
+
         .get(axum::http::header::CONTENT_LENGTH)
         .and_then(|val| val.to_str().ok())
         .and_then(|val| val.parse().ok())
@@ -412,20 +437,24 @@ async fn upload(headers: HeaderMap, mut multipart: Multipart) -> impl IntoRespon
                 }
 
                 let mut global_written : u64 = 0; //this is to keep everything normal
-
+                println!("\nBeginning Upload Now...\n");
     while let Some(mut field) = multipart.next_field().await.unwrap() {
         if let Some(filename) = field.file_name().map(|s| s.to_string()) {
 
             let file_name= field.file_name().map(|s| s.to_string());
             let name_of_file = file_name.unwrap();
+            //block bad names and security flaws.
+            if name_of_file.contains('/') || name_of_file.contains('\\') || name_of_file.contains("..") {
+            println!("WARNING: Malicious path traversal attempt blocked: {}", name_of_file);
+            return (StatusCode::BAD_REQUEST, "Invalid filename").into_response();
+    }
     
             let path = PathBuf::from("uploads").join(&filename);
             let file = File::create(&path).await.unwrap();
-            let chunk_size = CONFIG.upload_speed_bps as usize;
+            let chunk_size = 128*1024; //128KB Keep it static to use less data
             let mut buf_writer = BufWriter::with_capacity(chunk_size, file);
-            //let mut written: u64 = 0;
-            println!("\nBeginning Upload Now...");
             
+            let mut last_print=Instant::now();
             // 3. Process the incoming network chunks
             while let Some(chunk) = field.chunk().await.unwrap() {
                 global_written += chunk.len() as u64;
@@ -446,19 +475,23 @@ async fn upload(headers: HeaderMap, mut multipart: Multipart) -> impl IntoRespon
             }
                 // Write the network chunk into RAM buffer. 
                 buf_writer.write_all(&chunk).await.unwrap();
-                print!("\rUploading '{}' || {:.2} Megabytes Written  {:.2}%",name_of_file,write_size,percentage);
-                //update the terminal immediately.
-                std::io::stdout().flush().unwrap();
+
+                //This slows the terminal but increases the speed of the upload. woohoo?
+                //yeah it's super fast.
+                if last_print.elapsed().as_millis()>200{
+                    print!("\rUploading '{}' || {:.2} Megabytes Written  {:.2}%",name_of_file,write_size,percentage);
+                    
+                    std::io::stdout().flush().unwrap();
+                    last_print=Instant::now();
+                }
+                
             }
             
-            // 4. IMPORTANT: Flush the writer!
-            // When the upload finishes, there might be a partially filled buffer 
-            // (e.g., 500KB) still sitting in RAM. This forces it to write to the disk.
-            
+            //flush the writer if it's done.
             buf_writer.flush().await.unwrap();
             
             //added some pretty diagnostic stuff.
-            println!("\nUser uploaded '{}' to the dashboard on {}",name_of_file,get_time());
+            println!("\n   ⬆️ Uploaded '{}' to the dashboard on {}",name_of_file,get_time());
         }
     }
     Redirect::to("/").into_response()
@@ -479,9 +512,18 @@ async fn list_files() -> Json<Vec<String>> {
     Json(names)
 }
 
-//handles downloads device -> server
-//high level code...
+///Handles downloads from the program into the browser downloader.
+/// 
+/// * `name` - the name of the file as defined by the names section.
+/// * `response` - Hopefully resolves successfully.
 async fn download(Path(name): Path<String>) -> impl IntoResponse {
+
+    //block a bad name
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        println!("WARNING: Malicious path traversal attempt blocked: {}", name);
+        return (StatusCode::BAD_REQUEST, "Invalid filename").into_response();
+    }
+
     let path = PathBuf::from("uploads").join(&name);
     //the file must exist.
     if !path.exists() {
@@ -491,30 +533,52 @@ async fn download(Path(name): Path<String>) -> impl IntoResponse {
     //the file must be accessible.
     let file = match File::open(&path).await {
         Ok(f) => f,
-        Err(_) => {println!("ERROR! File not Accessible!\n");
-        return (StatusCode::INTERNAL_SERVER_ERROR, "Can't open file").into_response()}, 
+        Err(e) => match e.kind() {
+            std::io::ErrorKind::NotFound => {
+                println!("Download failed: File '{}' not found.", name);
+                return (StatusCode::NOT_FOUND, "File not found").into_response();
+            }
+            _ => {
+                println!("Download failed: File '{}' inaccessible. Error: {}", name, e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Can't open file").into_response();
+            }
+        },
     };
 
+    let file_size = match file.metadata().await {
+        Ok(meta) => meta.len(),
+        Err(_) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Can't read metadata").into_response();
+        }
+    };
+   
     //splitting the file up.
-    let chunk_size = CONFIG.download_speed_bps as usize; //now controlled properly
+    let chunk_size = 128*1024; //now controlled properly
     let buf_reader = BufReader::with_capacity(chunk_size, file);
+
     //have the stream adapt to the values it is given.
+
     let stream = ReaderStream::new(buf_reader);
     let body = Body::from_stream(stream);
 
     // Guess MIME type (or fallback to binary)
     let mime = mime_guess::from_path(&path).first_or_octet_stream();
     let mut headers = HeaderMap::new();
+
     headers.insert(
         header::CONTENT_TYPE,
-        mime.to_string().parse().unwrap(),
+        HeaderValue::from_str(mime.as_ref()).unwrap_or(HeaderValue::from_static("application/octet-stream")),
     );
-    headers.insert(
-        header::CONTENT_DISPOSITION,
-        format!("attachment; filename=\"{}\"", name).parse().unwrap(),
-    );
+
+    let disposition = format!("attachment; filename=\"{}\"", name);
+    if let Ok(header_value) = HeaderValue::from_str(&disposition) {
+        headers.insert(header::CONTENT_DISPOSITION, header_value);
+    }
+
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(file_size)); //give a file size to the browser so that it can use its own time evaluation.
+
     //give the terminal some feedback for downloads
-    println!("User downloaded '{}' from the dashboard on {}",name,get_time());
+    println!("⬇️ User downloaded '{}' from the dashboard on {}",name,get_time());
     (headers, body).into_response()
     
 }
